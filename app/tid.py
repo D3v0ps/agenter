@@ -9,9 +9,25 @@ STOCKHOLM = ZoneInfo(TIDSZON)
 
 
 def till_utc(dt: datetime) -> datetime:
-    """Naiv tid tolkas som Stockholm; tidszonsmedveten tid konverteras."""
+    """Naiv tid tolkas som Stockholm; tidszonsmedveten tid konverteras.
+
+    Naiva klockslag som inte existerar (vårens sommartidshopp) eller är
+    tvetydiga (höstens tillbakaställning) ger ValueError i stället för att
+    tyst förskjutas — ATL-beräkningar får aldrig räkna på gissade tider."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=STOCKHOLM)
+        lokal = dt.replace(tzinfo=STOCKHOLM)
+        aterresa = lokal.astimezone(timezone.utc).astimezone(STOCKHOLM)
+        if aterresa.replace(tzinfo=None, fold=0) != dt:
+            raise ValueError(
+                f"tidpunkten {dt} finns inte i Europe/Stockholm "
+                f"(sommartidsomställning)"
+            )
+        if lokal.utcoffset() != dt.replace(tzinfo=STOCKHOLM, fold=1).utcoffset():
+            raise ValueError(
+                f"tidpunkten {dt} är tvetydig i Europe/Stockholm "
+                f"(sommartidsomställning) — ange tid med tidszon"
+            )
+        dt = lokal
     return dt.astimezone(timezone.utc)
 
 

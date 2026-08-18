@@ -74,7 +74,9 @@ def registrera_utskick(
     if not konsult_ids:
         raise ValueError("minst en konsult krävs för ett utskick")
     with i_transaktion(session):
-        forfragan = hamta_forfragan(session, forfragan_id)
+        # Radlås: utan det kan en parallellt committad stängning skrivas
+        # över när statusbytet flushas (återupplivad förfrågan).
+        forfragan = hamta_forfragan(session, forfragan_id, las=True)
         if forfragan.status not in (
             ForfraganStatus.GODKAND,
             ForfraganStatus.UTSKICKAD,

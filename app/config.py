@@ -11,9 +11,11 @@ DATABASE_URL_TEST = os.environ.get(
 )
 
 # Hemlig nyckel för HMAC-hashning av personnummer.
-# MÅSTE sättas till en riktig hemlighet via miljövariabel före produktion.
-PNR_HASH_NYCKEL = os.environ.get(
-    "PNR_HASH_NYCKEL", "utvecklingsnyckel-byt-fore-produktion"
-)
+# MÅSTE sättas till en riktig hemlighet (Secret Manager) före produktion —
+# en förlorad nyckel bryter dublettkontrollen permanent.
+_STANDARDNYCKEL = "utvecklingsnyckel-byt-fore-produktion"
+PNR_HASH_NYCKEL = os.environ.get("PNR_HASH_NYCKEL", _STANDARDNYCKEL)
+# Importkommandona varnar när utvecklingsnyckeln används.
+PNR_NYCKEL_AR_STANDARD = PNR_HASH_NYCKEL == _STANDARDNYCKEL
 
 TIDSZON = "Europe/Stockholm"

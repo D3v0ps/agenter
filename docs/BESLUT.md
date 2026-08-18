@@ -179,3 +179,82 @@ build-backend + paketering hade inte tillfört något i detta skede.
 ("Nej, kan inte idag") tolkas som "okant" och demon förklarar varför —
 kärnan gissar aldrig, AI-lagret får tolka fritext senare. Att dölja detta i
 demon hade gett en missvisande bild av kärnans ansvar.
+
+## 2026-08-18 — Åtgärder efter flerlinsgranskning
+
+Kodbasen granskades av fem oberoende granskningsagenter (linser: samtidighet,
+ATL-matematik, hårda regler, import-robusthet, schema/migrationer) och varje
+fynd prövades adversariellt av en skeptisk verifierare. Samtliga bekräftade
+fynd är åtgärdade eller uttryckligen beslutade nedan.
+
+**B30. ATL-viloreglerna kontrolleras med perioder ankrade vid arbetsblockens
+gränser — inte fullt rullande (bekräftat fynd, medvetet vägval).**
+Granskningen visade korrekt att "största vila i glidande fönster" kan ha
+minima MELLAN ankarpunkterna, som kontrollen inte prövar. En fullt rullande
+kontroll skulle dock underkänna lagliga scheman som kravbilden uttryckligen
+kräver ska godtas — t.ex. 13 h pass följt av exakt 11 h vila (varje fönster
+mitt i vilan delar den i två delar under 11 h, alltid). Lagens dygnsvila
+räknas per beräkningsperiod med fast brytpunkt (ATL §13), inte rullande;
+ankring vid varje blockgräns är striktare än så. Arbetstidstaket är däremot
+matematiskt exakt även rullande (verifierat med brute-force av granskaren).
+Semantiken är nu dokumenterad i atl.py och atl_config.py och SKA bekräftas
+mot Bemanningsavtalets beräkningsperioder före produktion.
+
+**B31. Tilldelningar serialiseras per konsult (radlås på konsultraden)**
+— åtgärdar bekräftat write-skew-fynd: två samtidiga JA på förfrågningar med
+ICKE-överlappande tider kunde båda passera ATL-kontrollen (ingen constraint
+skyddar vilotid, bara överlapp). Konsultradlåset gör att den andra
+transaktionen väntar och ser den förstas bokning. Race-testat. *Bortvalt:*
+SERIALIZABLE-isolering (retrylogik överallt), advisory locks (radlåset är
+enklare och följer datamodellen).
+
+**B32. Kvalificeringen kontrolleras även vid tilldelning** (aktiv anställning
++ genomförd introduktion) med orsak "ej_kvalificerad" — åtgärdar bekräftat
+fynd: svar kan komma långt efter utskicket (konsulten kan ha slutat), och
+verktygen ska tåla direktanrop från agentlagret. Ersätter B26:s hållning för
+tilldelningen; registrera_utskick kontrollerar fortsatt inte kvalificering
+(ett SMS till fel person är återkalleligt — en bokning är det inte).
+
+**B33. Alla statusskrivande verktyg tar radlås på förfrågningsraden**
+(godkann, stang, registrera_utskick — tilldela/slapp hade det redan) —
+åtgärdar bekräftat fynd där registrera_utskick kunde skriva över en
+samtidigt committad stängning med sitt inaktuella minnesvärde och därmed
+återuppliva en terminal förfrågan. Race-testat (utskick mot samtidig
+stängning).
+
+**B34. Nekande kontroller körs före platsradlåset** — åtgärdar bekräftat
+fynd: en transaktion som skulle nekas (t.ex. överlappande bokning) höll
+platsradens lås till commit, så samtidiga konkurrenter fick falskt
+"fullt_besatt" via SKIP LOCKED trots att platsen förblev ledig.
+
+**B35. Migration 0003: platsrader kan inte flyttas mellan förfrågningar och
+tilldelade platsrader kan inte raderas** — åtgärdar två bekräftade fynd:
+(1) UPDATE av forfragan_id kringgick triggerräkningen under samtidighet
+(räkning utan radlås är bara säker om forfragan_id är oföränderlig — nu är
+den det); (2) DELETE av en tilldelad platsrad gjorde bokningen föräldralös
+och platsen "ledig" → förfrågan kunde i praktiken överbemannas.
+
+**B36. Personnummer förekommer aldrig i felmeddelanden** — åtgärdar
+bekräftat fynd: normaliseringsfelen interpolerade cellvärdet, som via
+radfelsrapporten skrivs till stdout/pipelineloggar. Vakttest tillagt.
+Telefonnummer i felmeddelanden behålls (behövs för felsökning, omfattas inte
+av den hårda regeln).
+
+**B37. Sekelregeln är dagexakt** — åtgärdar bekräftat fynd: jämförelsedatumet
+hade dagen hårdkodad till 1, så nyblivna 16-åringar (födda dag 2–idag i
+innevarande månad) fick sekel 19 och därmed fel identitetshash, dessutom
+beroende av körningsdatum. Skottdagsfall hanteras (29 feb → 28 feb).
+
+**B38. Naiva klockslag som inte finns eller är tvetydiga vid
+sommartidsomställning ger fel i stället för tyst gissning** (till_utc →
+radfel i import) — ATL-beräkningar får aldrig räkna på tider som kan vara en
+timme fel. *Bortvalt:* PEP 495-fold-konvention utan fel (tyst val är exakt
+det granskningen varnade för).
+
+**B39. Trunkerade mobilnummer ger radfel** (07x-nummer kräver exakt 9
+siffror efter +46) — ett nummer med tappad siffra importerades annars
+obrukbart och upptäcktes först när konsulten aldrig fick några SMS.
+
+**B40. Importkommandona varnar på stderr när utvecklingsnyckeln används**
+(PNR_HASH_NYCKEL ej satt) — en tyst nyckelfallback i produktion gör
+hasharna uppslagbara via ordboksattack. Kompletterar B25.

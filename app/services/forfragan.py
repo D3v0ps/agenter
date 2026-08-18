@@ -82,7 +82,7 @@ def godkann_forfragan(session: Session, forfragan_id: int, aktor: str = "system"
     registreras. Returnerar {"forfragan_id", "status"}.
     """
     with i_transaktion(session):
-        forfragan = hamta_forfragan(session, forfragan_id)
+        forfragan = hamta_forfragan(session, forfragan_id, las=True)
         byt_status(session, forfragan, ForfraganStatus.GODKAND, aktor)
     return {"forfragan_id": forfragan.id, "status": forfragan.status.value}
 
@@ -103,7 +103,7 @@ def stang_forfragan(
     """
     ny = ForfraganStatus.ESKALERAD if eskalera else ForfraganStatus.STANGD
     with i_transaktion(session):
-        forfragan = hamta_forfragan(session, forfragan_id)
+        forfragan = hamta_forfragan(session, forfragan_id, las=True)
         byt_status(session, forfragan, ny, aktor, extra={"orsak": orsak} if orsak else None)
     return {"forfragan_id": forfragan.id, "status": forfragan.status.value}
 

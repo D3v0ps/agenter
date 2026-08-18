@@ -3,11 +3,22 @@ veckovila eller taket för total arbetstid per rullande sjudagarsperiod.
 
 Metod: kandidatpasset läggs ihop med konsultens ALLA aktiva bokningar (även
 importerade befintliga pass) och slås samman till sammanhängande
-arbetsblock. Varje regel utvärderas sedan över glidande fönster. De
-fönsterstarter som kontrolleras är blockgränserna samt blockgränserna minus
-periodlängden — extremvärdena för styckvis linjära funktioner (största vila
-respektive summerad arbetstid i ett fönster) ligger alltid i sådana
-brytpunkter, så kontrollen är exakt och inte ett stickprov.
+arbetsblock. Varje regel utvärderas sedan över perioder (fönster) förlagda
+vid varje arbetsblocks start och slut, samt dessa minus periodlängden.
+
+PERIODSEMANTIK — viktigt att förstå och stämma av mot Bemanningsavtalet:
+- För ARBETSTIDSTAKET (48 h/7 dygn) är kontrollen matematiskt exakt även i
+  fullt rullande mening: summerad arbetstid i ett glidande fönster är en
+  styckvis linjär funktion vars maximum alltid ligger i en blockgräns.
+- För VILOREGLERNA (dygnsvila/veckovila) kontrolleras perioder ankrade vid
+  blockgränserna. Det motsvarar och överträffar lagens fasta
+  beräkningsperioder (ATL §13: 24-timmarsperioder med fast brytpunkt vald
+  av arbetsgivaren), men är MEDVETET inte en fullt rullande kontroll av
+  varje tänkbar fönsterstart. En fullt rullande kontroll skulle underkänna
+  scheman som är lagliga och som kravbilden uttryckligen kräver ska godtas
+  — t.ex. ett 13-timmarspass följt av exakt 11 timmars vila, där ett
+  fönster mitt i vilan alltid delar den i två delar under 11 h.
+  Se docs/BESLUT.md (B30).
 
 Endast fönster som överlappar kandidatpasset kan blockera: ett redan
 befintligt (t.ex. importerat) regelbrott ska inte hindra ett obesläktat pass

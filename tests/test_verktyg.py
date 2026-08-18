@@ -236,6 +236,36 @@ def test_overlappande_bokning_blockerar_tilldelning(session):
     assert session.get(Forfragan, fid).status == ForfraganStatus.UTSKICKAD
 
 
+def test_tilldelning_kraver_kvalificering(session):
+    """Kvalificeringen kontrolleras även vid tilldelning — svar kan komma
+    långt efter utskicket och verktyget kan anropas direkt."""
+    kund, konsulter = _seed(session, antal_konsulter=1)
+    konsult = konsulter[0]
+    fid = skapa_forfragan(
+        session, kund_id=kund.id, antal_begarda=1, starttid=START, sluttid=SLUT
+    )["forfragan_id"]
+    godkann_forfragan(session, fid)
+    uid = registrera_utskick(session, fid, [konsult.id], "Jobba?")["skickade"][0][
+        "utskick_id"
+    ]
+
+    # konsulten slutar mellan utskick och svar
+    konsult.aktiv = False
+    session.commit()
+
+    svar = registrera_svar(session, uid, "JA")
+    assert svar["tilldelad"] is False
+    assert svar["orsak"] == "ej_kvalificerad"
+
+    # okvalificerad (ingen introduktion hos kunden) nekas också
+    frammande = ny_konsult(session, "Främmande Falk", index=99)
+    session.commit()
+    registrera_utskick(session, fid, [frammande.id], "Jobba?")
+    utfall = tilldela_plats(session, fid, frammande.id)
+    assert utfall["tilldelad"] is False
+    assert utfall["orsak"] == "ej_kvalificerad"
+
+
 def test_tilldelning_i_fel_status(session):
     kund, konsulter = _seed(session, antal_konsulter=1)
     fid = skapa_forfragan(

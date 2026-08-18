@@ -23,12 +23,14 @@ from app.models import (
     BokningStatus,
     Forfragan,
     ForfraganStatus,
+    Konsult,
+    Kvalifikation,
     Plats,
 )
 from app.services.atl import berakna_atl
 from app.services.gemensamt import HittadesInte, i_transaktion
 from app.statusmaskin import byt_status
-from app.tid import nu_utc
+from app.tid import nu_utc, till_lokal
 
 # Fylld ingår: ett sent JA ska få det konsekventa svaret "fullt_besatt"
 # (via radsökningen), inte ett statusfel.
@@ -118,8 +120,57 @@ def _tilldela(
     if befintlig is not None:
         return _upprepad(session, forfragan_id, konsult_id, aktor, befintlig)
 
+    # Radlås på konsultraden: serialiserar alla samtidiga tilldelningar för
+    # samma konsult. Utan detta kan två parallella JA på olika förfrågningar
+    # med ICKE-överlappande tider båda passera ATL-kontrollen (write-skew
+    # under READ COMMITTED) — vilotidsregler har inget skydd i databasens
+    # constraints, så serialiseringen är själva spärren.
+    konsult = session.execute(
+        select(Konsult).where(Konsult.id == konsult_id).with_for_update()
+    ).scalar_one_or_none()
+    if konsult is None:
+        raise HittadesInte(f"konsult {konsult_id} finns inte")
+
+    # Kvalificeringskrav vid tilldelning: aktiv anställning + genomförd
+    # introduktion hos kunden. Svar kan komma långt efter utskicket, och
+    # verktyget kan anropas direkt — kärnan litar inte på anroparen.
+    kvalifikation = session.scalar(
+        select(Kvalifikation).where(
+            Kvalifikation.konsult_id == konsult_id,
+            Kvalifikation.kund_id == forfragan.kund_id,
+        )
+    )
+    intro_senast = till_lokal(forfragan.starttid).date()
+    if (
+        not konsult.aktiv
+        or kvalifikation is None
+        or kvalifikation.introduktionsdatum is None
+        or kvalifikation.introduktionsdatum > intro_senast
+    ):
+        return _nekad(session, forfragan_id, konsult_id, aktor, "ej_kvalificerad")
+
+    # Ren tidsöverlapp: skydd mot dubbelbokning mellan parallella
+    # förfrågningar utöver ATL-reglerna. Kontrollen görs FÖRE platsradlåset
+    # så att en nekad transaktion aldrig håller en platsrad låst (vilket gav
+    # falska "fullt_besatt" för samtidiga konkurrenter). Konsultradlåset
+    # ovan serialiserar kapplöpningen; exclusion-constrainten i databasen
+    # är sista skyddsnätet.
+    overlappande = session.scalar(
+        select(Bokning.id)
+        .where(
+            Bokning.konsult_id == konsult_id,
+            Bokning.status == BokningStatus.BOKAD,
+            Bokning.starttid < forfragan.sluttid,
+            Bokning.sluttid > forfragan.starttid,
+        )
+        .limit(1)
+    )
+    if overlappande is not None:
+        return _nekad(session, forfragan_id, konsult_id, aktor, "overlappande_bokning")
+
     # ATL-spärren kontrolleras igen vid tilldelning (bältet + hängslen —
     # utskicket kan ha registrerats innan konsulten fick andra pass).
+    # Tack vare konsultradlåset ser kontrollen alla committade bokningar.
     atl = berakna_atl(session, konsult_id, forfragan.starttid, forfragan.sluttid)
     if not atl.ok:
         skriv_audit(
@@ -136,7 +187,8 @@ def _tilldela(
         return TilldelningsUtfall(False, "atl_brott")
 
     # Först till kvarn: ta en ledig platsrad, hoppa över rader som en
-    # samtidig transaktion redan håller låsta.
+    # samtidig transaktion redan håller låsta. Alla nekande kontroller är
+    # redan gjorda — låset hålls bara av transaktioner som fullföljer.
     plats = session.execute(
         select(Plats)
         .where(Plats.forfragan_id == forfragan_id, Plats.konsult_id.is_(None))
@@ -145,23 +197,6 @@ def _tilldela(
     ).scalar_one_or_none()
     if plats is None:
         return _nekad(session, forfragan_id, konsult_id, aktor, "fullt_besatt")
-
-    # Ren tidsöverlapp kontrolleras i samma transaktion som radlåset — skydd
-    # mot dubbelbokning mellan parallella förfrågningar, utöver ATL-reglerna.
-    # (Exclusion-constrainten i databasen täcker även kapplöpningen där två
-    # transaktioner kontrollerar samtidigt.)
-    overlappande = session.scalar(
-        select(Bokning.id)
-        .where(
-            Bokning.konsult_id == konsult_id,
-            Bokning.status == BokningStatus.BOKAD,
-            Bokning.starttid < forfragan.sluttid,
-            Bokning.sluttid > forfragan.starttid,
-        )
-        .limit(1)
-    )
-    if overlappande is not None:
-        return _nekad(session, forfragan_id, konsult_id, aktor, "overlappande_bokning")
 
     for _ in range(3):
         try:
@@ -265,9 +300,14 @@ def tilldela_plats(
     befintliga tilldelningen (tilldelad=True, orsak="redan_tilldelad") —
     ett andra JA tar aldrig en ny plats. Allt auditloggas.
 
+    Tilldelningar för samma konsult serialiseras via radlås på
+    konsultraden, och konsulten måste vara kvalificerad (aktiv anställning
+    + genomförd introduktion hos kunden) även vid tilldelning.
+
     Returnerar {"tilldelad": bool, "orsak": str | None, "plats_id",
     "bokning_id"}. Orsaker vid nekad tilldelning: "fullt_besatt",
-    "overlappande_bokning", "atl_brott", "forfragan_i_status_<status>".
+    "ej_kvalificerad", "overlappande_bokning", "atl_brott",
+    "forfragan_i_status_<status>".
     """
     with i_transaktion(session):
         utfall = _tilldela(session, forfragan_id, konsult_id, aktor)

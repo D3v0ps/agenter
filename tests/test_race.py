@@ -197,6 +197,100 @@ def test_race_dubbla_ja_fran_samma_konsult(sessionfabrik):
         assert tilldelningar == 1
 
 
+def test_race_atl_tva_ickeoverlappande_forfragningar(sessionfabrik):
+    """Två förfrågningar vars pass INTE överlappar men som tillsammans
+    bryter dygnsvilan (nattpass 22–06 + dagpass 08–16). Samma konsult
+    svarar JA på båda samtidigt: konsultradlåset serialiserar
+    tilldelningarna, så den andra ser den förstas bokning och stoppas av
+    ATL-spärren — exclusion-constrainten kan inte hjälpa här (ingen
+    tidsöverlapp)."""
+    kund_id, konsult_id = _seed_en_konsult(sessionfabrik)
+    natt_start = datetime(2026, 9, 1, 22, 0, tzinfo=timezone.utc)
+    pass_tider = [
+        (natt_start, natt_start + timedelta(hours=8)),                    # 22–06
+        (natt_start + timedelta(hours=10), natt_start + timedelta(hours=18)),  # 08–16
+    ]
+    utskick_ids = []
+    with sessionfabrik() as session:
+        for starttid, sluttid in pass_tider:
+            fid = skapa_forfragan(
+                session,
+                kund_id=kund_id,
+                antal_begarda=1,
+                starttid=starttid,
+                sluttid=sluttid,
+            )["forfragan_id"]
+            godkann_forfragan(session, fid)
+            utskick_ids.append(
+                registrera_utskick(session, fid, [konsult_id], "Svara JA")[
+                    "skickade"
+                ][0]["utskick_id"]
+            )
+
+    utfall = _kor_samtidigt(sessionfabrik, utskick_ids)
+
+    tilldelade = [r for r in utfall if r["tilldelad"]]
+    nekade = [r for r in utfall if not r["tilldelad"]]
+    assert len(tilldelade) == 1
+    assert len(nekade) == 1
+    assert nekade[0]["orsak"] == "atl_brott"
+
+    with sessionfabrik() as session:
+        bokade = session.scalar(
+            select(func.count())
+            .select_from(Bokning)
+            .where(
+                Bokning.konsult_id == konsult_id,
+                Bokning.status == BokningStatus.BOKAD,
+            )
+        )
+        assert bokade == 1
+
+
+def test_race_utskick_mot_samtidig_stangning(sessionfabrik):
+    """registrera_utskick får aldrig återuppliva en samtidigt stängd
+    förfrågan: radlåset gör att utskicket väntar på stängningen och sedan
+    ser status stängd."""
+    from app.models import Forfragan, ForfraganStatus
+    from app.services import OgiltigOvergang
+    from app.statusmaskin import byt_status
+
+    kund_id, konsult_id = _seed_en_konsult(sessionfabrik)
+    with sessionfabrik() as session:
+        fid = skapa_forfragan(
+            session, kund_id=kund_id, antal_begarda=1, starttid=START, sluttid=SLUT
+        )["forfragan_id"]
+        godkann_forfragan(session, fid)
+
+    resultat: list[object] = []
+
+    def forsok_utskick() -> None:
+        with sessionfabrik() as egen:
+            try:
+                registrera_utskick(egen, fid, [konsult_id], "för sent")
+                resultat.append("utskickad")
+            except OgiltigOvergang as fel:
+                resultat.append(fel)
+
+    with sessionfabrik() as s1:
+        # T1 håller radlåset på förfrågan (pågående stängning)
+        forfragan = s1.execute(
+            select(Forfragan).where(Forfragan.id == fid).with_for_update()
+        ).scalar_one()
+        trad = threading.Thread(target=forsok_utskick)
+        trad.start()
+        trad.join(timeout=0.5)  # T2 ska stå och vänta på låset
+        assert trad.is_alive(), "utskicket borde blockeras av radlåset"
+        byt_status(s1, forfragan, ForfraganStatus.STANGD, "test")
+        s1.commit()  # släpper låset — T2 vaknar och ser 'stangd'
+        trad.join(timeout=30)
+
+    assert len(resultat) == 1
+    assert isinstance(resultat[0], OgiltigOvergang)
+    with sessionfabrik() as session:
+        assert session.get(Forfragan, fid).status == ForfraganStatus.STANGD
+
+
 def test_race_tva_overlappande_forfragningar_samma_konsult(sessionfabrik):
     """Två förfrågningar med överlappande tid, samma konsult svarar JA på
     båda samtidigt: exakt EN tilldelning lyckas — överlappskontrollen i

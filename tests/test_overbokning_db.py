@@ -69,6 +69,40 @@ def test_dubbel_tilldelning_av_samma_konsult_stoppas_av_index(session):
     session.rollback()
 
 
+def test_platsrad_kan_inte_flyttas_mellan_forfragningar(session):
+    fid1 = _forfragan(session, antal=1)
+    kund2 = ny_kund(session, namn="Annan kund AB")
+    session.commit()
+    fid2 = skapa_forfragan(
+        session, kund_id=kund2.id, antal_begarda=2, starttid=START, sluttid=SLUT
+    )["forfragan_id"]
+    with pytest.raises(DBAPIError, match="flyttas"):
+        session.execute(
+            text("UPDATE plats SET forfragan_id = :mal WHERE forfragan_id = :fran"),
+            {"mal": fid2, "fran": fid1},
+        )
+    session.rollback()
+
+
+def test_tilldelad_platsrad_kan_inte_raderas(session):
+    kund = ny_kund(session)
+    konsult = ny_konsult(session, index=1)
+    ny_kvalifikation(session, konsult, kund)
+    session.commit()
+    fid = skapa_forfragan(
+        session, kund_id=kund.id, antal_begarda=1, starttid=START, sluttid=SLUT
+    )["forfragan_id"]
+    godkann_forfragan(session, fid)
+    registrera_utskick(session, fid, [konsult.id], "Jobba?")
+    assert tilldela_plats(session, fid, konsult.id)["tilldelad"] is True
+
+    with pytest.raises(DBAPIError, match="raderas"):
+        session.execute(
+            text("DELETE FROM plats WHERE forfragan_id = :fid"), {"fid": fid}
+        )
+    session.rollback()
+
+
 def test_overlappande_bokning_stoppas_av_exclusion_constraint(session):
     kund = ny_kund(session)
     konsult = ny_konsult(session, index=1)

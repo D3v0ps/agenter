@@ -106,6 +106,10 @@ def normalisera_telefon(varde: object) -> str:
         rest = rest[1:]
     if not rest.isdigit() or not (7 <= len(rest) <= 9):
         raise Normaliseringsfel(f"ogiltigt telefonnummer: {varde!r}")
+    # Mobilnummer (07x...) har alltid exakt 9 siffror efter +46 — kortare är
+    # ett trunkerat nummer som annars hade importerats obrukbart.
+    if rest.startswith("7") and len(rest) != 9:
+        raise Normaliseringsfel(f"ogiltigt mobilnummer (fel längd): {varde!r}")
     return "+46" + rest
 
 
@@ -131,9 +135,11 @@ def normalisera_personnummer(varde: object) -> str:
     """Normalisera personnummer till 12 siffror (ÅÅÅÅMMDDNNNN).
 
     Validerar datumdel (samordningsnummer med dag+60 accepteras) och
-    Luhn-kontrollsiffra. Sekelregel för 10 siffror: 20xx om personen då är
-    minst 16 år gammal är omöjligt väljs 19xx (konsulter antas vara ≥ 16 år).
-    """
+    Luhn-kontrollsiffra. Sekelregel för 10 siffror: 20xx väljs om personen
+    då är minst 16 år i dag, annars 19xx (konsulter antas vara ≥ 16 år).
+
+    HÅRD REGEL: felmeddelandena innehåller ALDRIG det inmatade värdet —
+    de skrivs till radfelsrapporter och konsol/pipelineloggar."""
     if varde is None:
         raise Normaliseringsfel("personnummer saknas")
     s = re.sub(r"\D", "", str(varde).strip())
@@ -141,15 +147,21 @@ def normalisera_personnummer(varde: object) -> str:
         tolv = s
     elif len(s) == 10:
         idag = date.today()
+        try:
+            sexton_ar_sedan = idag.replace(year=idag.year - 16)
+        except ValueError:  # 29 februari
+            sexton_ar_sedan = idag.replace(year=idag.year - 16, day=28)
         fodd_20 = _som_datum(2000 + int(s[:2]), int(s[2:4]), int(s[4:6]))
-        minst_16 = fodd_20 is not None and fodd_20 <= date(idag.year - 16, idag.month, 1)
+        minst_16 = fodd_20 is not None and fodd_20 <= sexton_ar_sedan
         tolv = ("20" if minst_16 else "19") + s
     else:
-        raise Normaliseringsfel(f"personnummer ska ha 10 eller 12 siffror: {varde!r}")
+        raise Normaliseringsfel(
+            f"personnummer ska ha 10 eller 12 siffror (fick {len(s)})"
+        )
     if _som_datum(int(tolv[:4]), int(tolv[4:6]), int(tolv[6:8])) is None:
-        raise Normaliseringsfel(f"ogiltigt datum i personnummer: {varde!r}")
+        raise Normaliseringsfel("ogiltigt datum i personnummer")
     if luhn_kontrollsiffra(tolv[2:11]) != int(tolv[11]):
-        raise Normaliseringsfel(f"felaktig kontrollsiffra i personnummer: {varde!r}")
+        raise Normaliseringsfel("felaktig kontrollsiffra i personnummer")
     return tolv
 
 
@@ -174,21 +186,29 @@ def tolka_bool(varde: object, standard: bool = True) -> bool:
 
 def tolka_tid(varde: object) -> datetime:
     """Tolka en tidpunkt från en Excel-cell. Naiva tider antas vara
-    Europe/Stockholm och konverteras till UTC."""
+    Europe/Stockholm och konverteras till UTC. Klockslag som inte finns
+    eller är tvetydiga vid sommartidsomställning ger radfel — ATL får
+    aldrig räkna på gissade tider."""
+    tolkad: datetime | None = None
     if isinstance(varde, datetime):
-        return till_utc(varde)
-    if isinstance(varde, str):
+        tolkad = varde
+    elif isinstance(varde, str):
         s = varde.strip()
         try:
-            return till_utc(datetime.fromisoformat(s))
+            tolkad = datetime.fromisoformat(s)
         except ValueError:
-            pass
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H.%M", "%d/%m/%Y %H:%M"):
-            try:
-                return till_utc(datetime.strptime(s, fmt))
-            except ValueError:
-                continue
-    raise Normaliseringsfel(f"ogiltig tidpunkt: {varde!r}")
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H.%M", "%d/%m/%Y %H:%M"):
+                try:
+                    tolkad = datetime.strptime(s, fmt)
+                    break
+                except ValueError:
+                    continue
+    if tolkad is None:
+        raise Normaliseringsfel(f"ogiltig tidpunkt: {varde!r}")
+    try:
+        return till_utc(tolkad)
+    except ValueError as fel:
+        raise Normaliseringsfel(str(fel)) from fel
 
 
 def las_excel(sokvag: str | Path) -> tuple[list[str], list[tuple[int, dict[str, object]]]]:

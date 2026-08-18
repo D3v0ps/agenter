@@ -3,7 +3,10 @@
 OBS: Dessa värden är försiktiga standardvärden och SKA stämmas av mot
 Bemanningsavtalet (och eventuella lokala avtal/kollektivavtalade avvikelser)
 innan produktion. Ändringar här slår direkt på vilka erbjudanden som
-blockeras.
+blockeras. Även PERIODSEMANTIKEN ska stämmas av: viloreglerna kontrolleras
+för perioder ankrade vid arbetsblockens gränser (se app/services/atl.py och
+docs/BESLUT.md B30) — bekräfta att det motsvarar avtalets beräkningsperioder
+och deras brytpunkter.
 
 Kontrollen räknar alltid mot ALLA aktiva bokningar, även importerade
 befintliga pass."""
