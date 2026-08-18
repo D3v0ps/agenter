@@ -64,3 +64,53 @@ utvecklare. Testerna kör alltid mot riktig Postgres, aldrig SQLite.
 krasch, inget importeras), radfel samlas per rad med radnummer medan giltiga
 rader importeras (savepoint per rad). Återimport av samma fil uppdaterar
 befintliga konsulter (nyckel: personnummer_hash).
+
+## 2026-08-18 — Etapp 2
+
+**B13. godkann_forfragan tillagd som verktygsfunktion.** Tillståndsmaskinen
+har övergången mottagen → godkänd men den ursprungliga verktygslistan saknade
+en funktion som utför den. Godkännandet är den mänskliga/agentstyrda grinden
+innan utskick, så den behöver en egen atomär funktion. *Bortvalt:* att låta
+registrera_utskick auto-godkänna (grinden hade försvunnit).
+
+**B14. Eskalering görs via stang_forfragan(eskalera=True),** inte via en egen
+verktygsfunktion — samma terminala flöde, en flagga skiljer. Eskalering är
+tillåten från alla aktiva tillstånd utom fylld (en fylld förfrågan är inte
+akut).
+
+**B15. Självövergångar är ogiltiga.** byt_status kastar OgiltigOvergang även
+för t.ex. godkänd → godkänd; dubbelklick och dubbelanrop ska synas, inte
+tystas. Interna anropare hoppar över statusbytet när status redan är rätt.
+
+**B16. Samtidighetsskydd i tre lager** för tilldelning:
+(1) SELECT ... FOR UPDATE SKIP LOCKED på platsraderna — samtidiga JA
+konkurrerar om ett ändligt antal rader, aldrig om en räknare;
+(2) partiellt unikt index — samma konsult kan inte hålla två platser på samma
+förfrågan; (3) constraint-trigger som räknar platsrader och tilldelningar mot
+antal_begarda + trigger som hindrar att antal_begarda sänks under antalet
+platsrader. *Bortvalt:* SERIALIZABLE-isolering (retry-logik i varje anrop för
+något databasen kan garantera billigare), deferred constraints (felet ska
+komma direkt, inte vid commit).
+
+**B17. Statusomräkning under radlås på förfrågningsraden.** Efter en
+tilldelning låses förfrågningsraden och antalet fyllda platser räknas om;
+utan låset kunde två samtidiga transaktioner båda räkna "inte fullt" och
+ingen sätta fylld. Låsordningen är alltid platsrad → förfrågningsrad, så
+dödläge kan inte uppstå.
+
+**B18. Svarstolkning är medvetet strikt.** Endast entydiga token (ja/j/yes/ok
+m.fl.) räknas som JA, nej/n/no som NEJ, allt annat "okant" utan tilldelning.
+Fritextförståelse är AI-lagrets jobb (senare projekt) — kärnan gissar aldrig.
+Råtexten sparas alltid på utskicket.
+
+**B19. Sena JA får svaret "fullt_besatt", inte ett statusfel.** Tilldelning
+tillåts tekniskt även i status fylld; radsökningen ger då korrekt orsak.
+Samma svar oavsett om JA:et kom mikrosekunder eller minuter för sent.
+
+**B20. Även nekade tilldelningsförsök auditloggas** (händelsen
+tilldelning_nekad med orsak) — "allt loggas" gäller också det som inte hände,
+det är underlaget för att i efterhand förklara varför en konsult blev utan.
+
+**B21. slapp_plats fungerar även på stängd förfrågan** (utan statusbyte):
+avhopp måste alltid kunna registreras och bokningen avbokas, annars blockerar
+en kvarglömd bokning konsultens framtida pass via exclusion-constrainten.
