@@ -161,3 +161,21 @@ tillstånd (inklusive tidsfrist i utskickad; fylld räknas inte som aktivt
 behov och behåller endast vägen till stängd/delvis_fylld), och avhopp efter
 fylld → delvis_fylld med nytt utskick tillåtet — båda enligt implementationen
 i etapp 2.
+
+## 2026-08-18 — Etapp 4
+
+**B27. Demon är också ett slutvillkorstest.** `python -m cli.demo` kör hela
+scenariot enbart via serviceskiktets verktygsfunktioner (samma väg som det
+framtida AI-lagret), verifierar själv att exakt 3 tilldelas vid de samtidiga
+JA:en och avslutar med felkod annars. Demon rensar och seedar om databasen
+i DATABASE_URL — den ska aldrig köras mot en databas med riktiga uppgifter.
+
+**B28. requirements.txt i stället för installerbart paket.** Projektet körs
+från repo-roten (`python -m cli...`, pytest med pythonpath). Ett
+build-backend + paketering hade inte tillfört något i detta skede.
+*Bortvalt:* pip install -e med setuptools-konfiguration.
+
+**B29. Demon visar den strikta svarstolkningen öppet:** Farids fritextsvar
+("Nej, kan inte idag") tolkas som "okant" och demon förklarar varför —
+kärnan gissar aldrig, AI-lagret får tolka fritext senare. Att dölja detta i
+demon hade gett en missvisande bild av kärnans ansvar.
