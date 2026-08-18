@@ -1,0 +1,20 @@
+[project]
+name = "miljonbemanning-karna"
+version = "0.1.0"
+description = "Deterministisk kärna för Miljonbemannings akutbemanning (lager 1). AI-agentlagret kopplas på senare och agerar endast via kärnans verktygsfunktioner."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "openpyxl>=3.1",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
