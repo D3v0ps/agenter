@@ -38,6 +38,12 @@ def importera_bokningar(
     - Rad som exakt matchar en befintlig aktiv bokning hoppas över.
     - Rad som överlappar en annan aktiv bokning för samma konsult ger radfel
       (databasens exclusion constraint gör dubbelbokning omöjlig).
+
+    ATOMÄR: uppstår något radfel rullas HELA importen tillbaka
+    (rapport.aterrullad=True) — en delvis importerad passhistorik skulle ge
+    en ATL-kontroll som ser giltig ut men räknar på ofullständiga data.
+    (Konsultimporten delimporterar däremot per rad; en konsult för mycket
+    eller för lite påverkar inte lagefterlevnaden.)
     """
     rapport = ImportRapport()
     kolumner, rader = las_excel(sokvag)
@@ -118,7 +124,14 @@ def importera_bokningar(
                 Radfel(radnr, "överlappar en befintlig bokning för konsulten")
             )
 
-    session.commit()
+    if rapport.radfel:
+        session.rollback()
+        rapport.aterrullad = True
+        rapport.skapade = 0
+        rapport.hoppade_over = 0
+        rapport.skapade_kunder = []
+    else:
+        session.commit()
     return rapport
 
 

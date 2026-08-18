@@ -72,6 +72,16 @@ Alla tidpunkter lagras som `timestamptz` (UTC). Indata utan tidszon tolkas som
 skapas exakt `antal_begärda` platsrader. En tilldelning tar en ledig rad med
 `SELECT … FOR UPDATE SKIP LOCKED` — det kan aldrig finnas fler tilldelningar
 än rader, och en constraint-trigger hindrar att extra rader smyger in.
+Ett partiellt unikt index (`förfrågan_id, konsult_id`) plus idempotent
+tilldelning gör att dubbla JA från samma konsult returnerar den befintliga
+tilldelningen i stället för att ta en ny plats, och tilldelningen verifierar
+i samma transaktion att konsulten saknar överlappande bokning (skydd mot
+dubbelbokning mellan parallella förfrågningar, utöver ATL).
+
+Importsemantik: konsultimporten är tolerant per rad (radfel rapporteras,
+övriga rader importeras), medan bokningsimporten är **atomär** — vid radfel
+rullas allt tillbaka och kommandot avslutas med felkod, eftersom
+ATL-kontrollen inte kan litas på mot en ofullständig passhistorik.
 
 ## Förfrågans tillståndsmaskin
 

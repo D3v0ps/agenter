@@ -4,7 +4,8 @@ Dessa funktioner är de ENDA ingångarna för framtida lager (AI-agentlagret
 exponerar dem som MCP-verktyg). Var och en är atomär, validerar sina
 övergångar och skriver till auditloggen.
 
-kontrollera_atl tillkommer i etapp 3."""
+"""
+from app.services.atl import kontrollera_atl
 from app.services.forfragan import (
     forfragan_status,
     godkann_forfragan,
@@ -31,6 +32,7 @@ __all__ = [
     "slapp_plats",
     "stang_forfragan",
     "forfragan_status",
+    "kontrollera_atl",
     "tolka_svar",
     "HittadesInte",
     "OgiltigOvergang",

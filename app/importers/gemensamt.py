@@ -36,11 +36,14 @@ class ImportRapport:
     hoppade_over: int = 0
     skapade_kunder: list[str] = field(default_factory=list)
     radfel: list[Radfel] = field(default_factory=list)
+    # Sätts av atomära importer (bokningar): radfel → allt rullas tillbaka.
+    aterrullad: bool = False
 
     @property
     def genomford(self) -> bool:
-        """False om importen inte kunde köras alls (saknade kolumner)."""
-        return not self.saknade_kolumner
+        """False om importen inte fullföljdes (saknade kolumner eller
+        återrullad atomär import)."""
+        return not self.saknade_kolumner and not self.aterrullad
 
     def sammanfattning(self) -> str:
         rader: list[str] = []
@@ -48,6 +51,18 @@ class ImportRapport:
             rader.append(
                 "Importen kunde inte köras — följande kolumner saknas i filen: "
                 + ", ".join(self.saknade_kolumner)
+            )
+            return "\n".join(rader)
+        if self.aterrullad:
+            rader.append(
+                f"VARNING: {len(self.radfel)} radfel — hela importen rullades "
+                f"tillbaka, INGA rader importerades."
+            )
+            for fel in self.radfel:
+                rader.append(f"  Rad {fel.rad}: {fel.fel}")
+            rader.append(
+                "ATL-kontrollen kan inte litas på förrän bokningsimporten är "
+                "komplett. Rätta felen i filen och kör om importen."
             )
             return "\n".join(rader)
         rader.append(

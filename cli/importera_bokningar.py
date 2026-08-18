@@ -22,6 +22,8 @@ def huvud(argv: list[str] | None = None) -> int:
     with skapa_sessionfabrik(motor)() as session:
         rapport = importera_bokningar(session, args.fil, aktor=args.aktor)
     print(rapport.sammanfattning())
+    # Atomär import: radfel → allt återrullat → felkod, så att skript och
+    # pipelines inte fortsätter med en passhistorik som ATL inte kan lita på.
     return 0 if rapport.genomford else 1
 
 

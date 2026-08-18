@@ -156,9 +156,60 @@ def test_dubbelt_ja_fran_samma_konsult(session):
 
     forsta = registrera_svar(session, uid, "JA")
     assert forsta["tilldelad"] is True
-    andra = registrera_svar(session, uid, "JA")  # dubblett-SMS
-    assert andra["tilldelad"] is False
+    # IDEMPOTENT: dubblett-SMS returnerar befintlig tilldelning,
+    # tar aldrig en ny plats
+    andra = registrera_svar(session, uid, "JA")
+    assert andra["tilldelad"] is True
     assert andra["orsak"] == "redan_tilldelad"
+    assert andra["plats_id"] == forsta["plats_id"]
+    assert andra["bokning_id"] == forsta["bokning_id"]
+    fyllda = session.scalar(
+        select(func.count())
+        .select_from(Plats)
+        .where(Plats.forfragan_id == fid, Plats.konsult_id.is_not(None))
+    )
+    assert fyllda == 1
+    bokningar = session.scalar(
+        select(func.count())
+        .select_from(Bokning)
+        .where(Bokning.status == BokningStatus.BOKAD)
+    )
+    assert bokningar == 1
+
+
+def test_parallella_forfragningar_ger_exakt_en_bokning(session):
+    """Två förfrågningar med överlappande tid: samma konsult svarar JA på
+    båda — den rena tidsöverlappskontrollen i tilldelningstransaktionen
+    stoppar den andra."""
+    kund, konsulter = _seed(session, antal_konsulter=1)
+    konsult = konsulter[0]
+    fid1 = skapa_forfragan(
+        session, kund_id=kund.id, antal_begarda=1, starttid=START, sluttid=SLUT
+    )["forfragan_id"]
+    fid2 = skapa_forfragan(
+        session,
+        kund_id=kund.id,
+        antal_begarda=1,
+        starttid=datetime(2026, 9, 1, 16, 0, tzinfo=timezone.utc),
+        sluttid=datetime(2026, 9, 1, 22, 0, tzinfo=timezone.utc),
+    )["forfragan_id"]
+    for fid in (fid1, fid2):
+        godkann_forfragan(session, fid)
+    uid1 = registrera_utskick(session, fid1, [konsult.id], "Pass A")["skickade"][0]["utskick_id"]
+    uid2 = registrera_utskick(session, fid2, [konsult.id], "Pass B")["skickade"][0]["utskick_id"]
+
+    ja1 = registrera_svar(session, uid1, "JA")
+    assert ja1["tilldelad"] is True
+    ja2 = registrera_svar(session, uid2, "JA")
+    assert ja2["tilldelad"] is False
+    assert ja2["orsak"] == "overlappande_bokning"
+
+    bokade = session.scalar(
+        select(func.count())
+        .select_from(Bokning)
+        .where(Bokning.konsult_id == konsult.id, Bokning.status == BokningStatus.BOKAD)
+    )
+    assert bokade == 1
 
 
 def test_overlappande_bokning_blockerar_tilldelning(session):

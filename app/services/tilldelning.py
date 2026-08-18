@@ -11,8 +11,9 @@ Samtidighetsskyddet i tre lager (defense in depth):
 """
 from dataclasses import dataclass
 
+from psycopg.errors import DeadlockDetected
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.audit import skriv_audit
@@ -24,6 +25,7 @@ from app.models import (
     ForfraganStatus,
     Plats,
 )
+from app.services.atl import berakna_atl
 from app.services.gemensamt import HittadesInte, i_transaktion
 from app.statusmaskin import byt_status
 from app.tid import nu_utc
@@ -65,6 +67,37 @@ def _nekad(
     return TilldelningsUtfall(False, orsak)
 
 
+def _befintlig_tilldelning(
+    session: Session, forfragan_id: int, konsult_id: int
+) -> Plats | None:
+    return session.execute(
+        select(Plats).where(
+            Plats.forfragan_id == forfragan_id, Plats.konsult_id == konsult_id
+        )
+    ).scalar_one_or_none()
+
+
+def _upprepad(
+    session: Session, forfragan_id: int, konsult_id: int, aktor: str, plats: Plats
+) -> TilldelningsUtfall:
+    """Idempotent upprepning: ett andra JA från samma konsult returnerar den
+    befintliga tilldelningen och tar aldrig en ny plats."""
+    skriv_audit(
+        session,
+        aktor,
+        "tilldelning_upprepad",
+        efter={
+            "forfragan_id": forfragan_id,
+            "konsult_id": konsult_id,
+            "plats_id": plats.id,
+            "bokning_id": plats.bokning_id,
+        },
+    )
+    return TilldelningsUtfall(
+        True, orsak="redan_tilldelad", plats_id=plats.id, bokning_id=plats.bokning_id
+    )
+
+
 def _tilldela(
     session: Session, forfragan_id: int, konsult_id: int, aktor: str
 ) -> TilldelningsUtfall:
@@ -81,13 +114,26 @@ def _tilldela(
             f"forfragan_i_status_{forfragan.status.value}",
         )
 
-    redan = session.scalar(
-        select(Plats.id).where(
-            Plats.forfragan_id == forfragan_id, Plats.konsult_id == konsult_id
+    befintlig = _befintlig_tilldelning(session, forfragan_id, konsult_id)
+    if befintlig is not None:
+        return _upprepad(session, forfragan_id, konsult_id, aktor, befintlig)
+
+    # ATL-spärren kontrolleras igen vid tilldelning (bältet + hängslen —
+    # utskicket kan ha registrerats innan konsulten fick andra pass).
+    atl = berakna_atl(session, konsult_id, forfragan.starttid, forfragan.sluttid)
+    if not atl.ok:
+        skriv_audit(
+            session,
+            aktor,
+            "tilldelning_nekad",
+            efter={
+                "forfragan_id": forfragan_id,
+                "konsult_id": konsult_id,
+                "orsak": "atl_brott",
+                "brott": [b.som_dict() for b in atl.brott],
+            },
         )
-    )
-    if redan is not None:
-        return _nekad(session, forfragan_id, konsult_id, aktor, "redan_tilldelad")
+        return TilldelningsUtfall(False, "atl_brott")
 
     # Först till kvarn: ta en ledig platsrad, hoppa över rader som en
     # samtidig transaktion redan håller låsta.
@@ -100,24 +146,61 @@ def _tilldela(
     if plats is None:
         return _nekad(session, forfragan_id, konsult_id, aktor, "fullt_besatt")
 
-    try:
-        with session.begin_nested():
-            bokning = Bokning(
-                konsult_id=konsult_id,
-                kund_id=forfragan.kund_id,
-                starttid=forfragan.starttid,
-                sluttid=forfragan.sluttid,
-                status=BokningStatus.BOKAD,
-                kalla=BokningKalla.INTERN,
+    # Ren tidsöverlapp kontrolleras i samma transaktion som radlåset — skydd
+    # mot dubbelbokning mellan parallella förfrågningar, utöver ATL-reglerna.
+    # (Exclusion-constrainten i databasen täcker även kapplöpningen där två
+    # transaktioner kontrollerar samtidigt.)
+    overlappande = session.scalar(
+        select(Bokning.id)
+        .where(
+            Bokning.konsult_id == konsult_id,
+            Bokning.status == BokningStatus.BOKAD,
+            Bokning.starttid < forfragan.sluttid,
+            Bokning.sluttid > forfragan.starttid,
+        )
+        .limit(1)
+    )
+    if overlappande is not None:
+        return _nekad(session, forfragan_id, konsult_id, aktor, "overlappande_bokning")
+
+    for _ in range(3):
+        try:
+            with session.begin_nested():
+                bokning = Bokning(
+                    konsult_id=konsult_id,
+                    kund_id=forfragan.kund_id,
+                    starttid=forfragan.starttid,
+                    sluttid=forfragan.sluttid,
+                    status=BokningStatus.BOKAD,
+                    kalla=BokningKalla.INTERN,
+                )
+                session.add(bokning)
+                session.flush()
+                plats.konsult_id = konsult_id
+                plats.bokning_id = bokning.id
+                plats.tilldelad = nu_utc()
+                session.flush()  # unikt index + constraint-trigger körs här
+            break
+        except IntegrityError as fel:
+            # Samtidiga dubbla JA: hann konsulten få en plats i en parallell
+            # transaktion är detta en idempotent upprepning, inte ett fel.
+            befintlig = _befintlig_tilldelning(session, forfragan_id, konsult_id)
+            if befintlig is not None:
+                return _upprepad(session, forfragan_id, konsult_id, aktor, befintlig)
+            return _nekad(
+                session, forfragan_id, konsult_id, aktor, _tolka_databassparr(fel)
             )
-            session.add(bokning)
-            session.flush()
-            plats.konsult_id = konsult_id
-            plats.bokning_id = bokning.id
-            plats.tilldelad = nu_utc()
-            session.flush()  # unikt index + constraint-trigger körs här
-    except IntegrityError as fel:
-        return _nekad(session, forfragan_id, konsult_id, aktor, _tolka_databassparr(fel))
+        except OperationalError as fel:
+            if not isinstance(fel.orig, DeadlockDetected):
+                raise
+            # Två transaktioner INSERT:ade samtidigt överlappande bokningar
+            # och bådas exclusion-kontroll väntade på varandra — Postgres
+            # dödade vår. Efter savepoint-återrullningen är vår tupel borta,
+            # motparten går vidare, och omtaget får antingen ett rent
+            # constraint-fel (→ overlappande_bokning) eller lyckas.
+            continue
+    else:
+        return _nekad(session, forfragan_id, konsult_id, aktor, "databassparr")
 
     # Lås förfrågningsraden och räkna om status. Låset serialiserar
     # statusberäkningen; räkningen ser då både egna och committade rader.
@@ -172,14 +255,19 @@ def tilldela_plats(
     kvarn. Vid N platser och fler samtidiga JA än N tilldelas exakt N,
     aldrig fler: lediga platsrader tas med radlås (FOR UPDATE SKIP LOCKED)
     och databasens constraint-trigger gör överbokning omöjlig även utanför
-    denna kodväg. Lyckad tilldelning skapar en intern bokning och
-    uppdaterar förfrågans status (utskickad/delvis_fylld → fylld när sista
-    platsen tas). Allt auditloggas.
+    denna kodväg. I samma transaktion verifieras att konsulten inte har
+    någon överlappande bokning (skydd mot dubbelbokning mellan parallella
+    förfrågningar) och att ATL-reglerna inte bryts. Lyckad tilldelning
+    skapar en intern bokning och uppdaterar förfrågans status
+    (utskickad/delvis_fylld → fylld när sista platsen tas).
+
+    IDEMPOTENT: är konsulten redan tilldelad på förfrågan returneras den
+    befintliga tilldelningen (tilldelad=True, orsak="redan_tilldelad") —
+    ett andra JA tar aldrig en ny plats. Allt auditloggas.
 
     Returnerar {"tilldelad": bool, "orsak": str | None, "plats_id",
     "bokning_id"}. Orsaker vid nekad tilldelning: "fullt_besatt",
-    "redan_tilldelad", "overlappande_bokning",
-    "forfragan_i_status_<status>".
+    "overlappande_bokning", "atl_brott", "forfragan_i_status_<status>".
     """
     with i_transaktion(session):
         utfall = _tilldela(session, forfragan_id, konsult_id, aktor)

@@ -112,20 +112,45 @@ def test_import_bokningar(session, tmp_path):
         BOKNINGSKOLUMNER,
         [
             ["0701112233", "Budbee Södertälje", datetime(2026, 1, 15, 8, 0), datetime(2026, 1, 15, 16, 0)],
-            ["0709999999", "Budbee Södertälje", datetime(2026, 1, 16, 8, 0), datetime(2026, 1, 16, 16, 0)],
         ],
     )
     rapport = importera_bokningar(session, fil)
+    assert rapport.genomford
     assert rapport.skapade == 1
     assert rapport.skapade_kunder == ["Budbee Södertälje"]
-    assert len(rapport.radfel) == 1
-    assert "okänd konsult" in rapport.radfel[0].fel
+    assert rapport.radfel == []
 
     bokning = session.scalar(select(Bokning))
     # naiv svensk vintertid 08:00 → 07:00 UTC
     assert bokning.starttid == datetime(2026, 1, 15, 7, 0, tzinfo=timezone.utc)
     assert bokning.kalla == BokningKalla.IMPORTERAD
     assert session.scalar(select(Kund).where(Kund.namn == "Budbee Södertälje")) is not None
+
+
+def test_import_bokningar_radfel_rullar_tillbaka_allt(session, tmp_path):
+    """Bokningsimporten är atomär: ett radfel (okänd konsult) rullar tillbaka
+    ALLT — även giltiga rader och auto-skapade kunder — och rapporten varnar
+    om att ATL-kontrollen inte kan litas på förrän importen är hel."""
+    _seed_konsult(session, tmp_path)
+    fil = skriv_xlsx(
+        tmp_path / "bokningar_fel.xlsx",
+        BOKNINGSKOLUMNER,
+        [
+            ["0701112233", "Budbee Södertälje", datetime(2026, 1, 15, 8, 0), datetime(2026, 1, 15, 16, 0)],
+            ["0709999999", "Budbee Södertälje", datetime(2026, 1, 16, 8, 0), datetime(2026, 1, 16, 16, 0)],
+        ],
+    )
+    rapport = importera_bokningar(session, fil)
+    assert rapport.aterrullad is True
+    assert not rapport.genomford
+    assert rapport.skapade == 0
+    assert len(rapport.radfel) == 1
+    assert "okänd konsult" in rapport.radfel[0].fel
+    assert "kan inte litas på" in rapport.sammanfattning()
+
+    assert session.scalar(select(func.count()).select_from(Bokning)) == 0
+    # även den auto-skapade kunden rullades tillbaka
+    assert session.scalar(select(Kund).where(Kund.namn == "Budbee Södertälje")) is None
 
 
 def test_import_bokningar_saknade_kolumner(session, tmp_path):
@@ -136,7 +161,7 @@ def test_import_bokningar_saknade_kolumner(session, tmp_path):
     assert not rapport.genomford
 
 
-def test_import_bokningar_overlapp_ger_radfel(session, tmp_path):
+def test_import_bokningar_overlapp_ger_radfel_och_aterrullning(session, tmp_path):
     _seed_konsult(session, tmp_path)
     fil = skriv_xlsx(
         tmp_path / "overlapp.xlsx",
@@ -147,10 +172,10 @@ def test_import_bokningar_overlapp_ger_radfel(session, tmp_path):
         ],
     )
     rapport = importera_bokningar(session, fil)
-    assert rapport.skapade == 1
+    assert rapport.aterrullad is True
     assert len(rapport.radfel) == 1
     assert "överlappar" in rapport.radfel[0].fel
-    assert session.scalar(select(func.count()).select_from(Bokning)) == 1
+    assert session.scalar(select(func.count()).select_from(Bokning)) == 0
 
 
 def test_import_bokningar_dubblett_hoppas_over(session, tmp_path):

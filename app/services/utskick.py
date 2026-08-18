@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.audit import skriv_audit
 from app.models import ForfraganStatus, Konsult, Utskick
 from app.repositories.kvalificering import kvalificerade_konsulter
+from app.services.atl import berakna_atl
 from app.services.gemensamt import HittadesInte, hamta_forfragan, i_transaktion
 from app.services.tilldelning import _tilldela
 from app.statusmaskin import OgiltigOvergang, byt_status
@@ -61,18 +62,21 @@ def registrera_utskick(
     Tillåtet i status godkänd (första utskicket — förfrågan går till
     utskickad), utskickad eller delvis_fylld (kompletterande utskick, t.ex.
     efter ett avhopp). Konsulter som redan fått utskick på förfrågan hoppas
-    över. Allt auditloggas.
+    över. Konsulter vars erbjudande skulle bryta mot ATL (dygnsvila,
+    veckovila eller veckoarbetstidstaket) BLOCKERAS och rapporteras — inget
+    utskick registreras för dem. Blockeras alla ändras inte förfrågans
+    status. Allt auditloggas.
 
     Returnerar {"status", "skickade": [{"utskick_id", "konsult_id"}],
-    "hoppade_over": [konsult_id, ...]}.
+    "hoppade_over": [konsult_id, ...],
+    "blockerade_atl": [{"konsult_id", "brott": [{"regel", "beskrivning"}]}]}.
     """
     if not konsult_ids:
         raise ValueError("minst en konsult krävs för ett utskick")
     with i_transaktion(session):
         forfragan = hamta_forfragan(session, forfragan_id)
-        if forfragan.status == ForfraganStatus.GODKAND:
-            byt_status(session, forfragan, ForfraganStatus.UTSKICKAD, aktor)
-        elif forfragan.status not in (
+        if forfragan.status not in (
+            ForfraganStatus.GODKAND,
             ForfraganStatus.UTSKICKAD,
             ForfraganStatus.DELVIS_FYLLD,
         ):
@@ -80,6 +84,7 @@ def registrera_utskick(
 
         skickade: list[dict] = []
         hoppade: list[int] = []
+        blockerade: list[dict] = []
         for konsult_id in konsult_ids:
             if session.get(Konsult, konsult_id) is None:
                 raise HittadesInte(f"konsult {konsult_id} finns inte")
@@ -91,6 +96,23 @@ def registrera_utskick(
             )
             if redan is not None:
                 hoppade.append(konsult_id)
+                continue
+            atl = berakna_atl(
+                session, konsult_id, forfragan.starttid, forfragan.sluttid
+            )
+            if not atl.ok:
+                brott = [b.som_dict() for b in atl.brott]
+                blockerade.append({"konsult_id": konsult_id, "brott": brott})
+                skriv_audit(
+                    session,
+                    aktor,
+                    "utskick_blockerat_atl",
+                    efter={
+                        "forfragan_id": forfragan_id,
+                        "konsult_id": konsult_id,
+                        "brott": brott,
+                    },
+                )
                 continue
             utskick = Utskick(
                 forfragan_id=forfragan_id,
@@ -111,10 +133,13 @@ def registrera_utskick(
                 },
             )
             skickade.append({"utskick_id": utskick.id, "konsult_id": konsult_id})
+        if skickade and forfragan.status == ForfraganStatus.GODKAND:
+            byt_status(session, forfragan, ForfraganStatus.UTSKICKAD, aktor)
     return {
         "status": forfragan.status.value,
         "skickade": skickade,
         "hoppade_over": hoppade,
+        "blockerade_atl": blockerade,
     }
 
 
@@ -126,7 +151,10 @@ def registrera_svar(
     Svarstexten lagras rått på utskicket och tolkas deterministiskt
     (tolka_svar). Vid JA görs ett atomärt tilldelningsförsök — först till
     kvarn; kommer JA:et när platserna redan är tagna blir utfallet
-    tilldelad=False med orsak "fullt_besatt". Allt auditloggas.
+    tilldelad=False med orsak "fullt_besatt". IDEMPOTENT för dubbla JA:
+    ett andra JA från samma konsult returnerar den befintliga tilldelningen
+    (tilldelad=True, orsak="redan_tilldelad") och tar aldrig en ny plats.
+    Allt auditloggas.
 
     Returnerar {"utskick_id", "konsult_id", "svar": "ja|nej|okant",
     "tilldelad": bool, "orsak": str | None}.

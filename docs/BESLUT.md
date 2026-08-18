@@ -114,3 +114,50 @@ det är underlaget för att i efterhand förklara varför en konsult blev utan.
 **B21. slapp_plats fungerar även på stängd förfrågan** (utan statusbyte):
 avhopp måste alltid kunna registreras och bokningen avbokas, annars blockerar
 en kvarglömd bokning konsultens framtida pass via exclusion-constrainten.
+
+## 2026-08-18 — Beställarens kompletteringar av planen
+
+**B22. Dubbla JA är idempotenta (beställarkrav).** Unikhetsgarantin
+UNIQUE(förfrågan_id, konsult_id) finns som partiellt unikt index på
+platstabellen. registrera_svar/tilldela_plats returnerar vid ett andra JA den
+BEFINTLIGA tilldelningen (tilldelad=True, orsak="redan_tilldelad") och tar
+aldrig en ny plats — även när de två JA:en kommer samtidigt (kapplöpningen
+fångas av unikindexet/exclusion-constrainten och löses upp till ett
+idempotent svar). Upprepningen auditloggas som tilldelning_upprepad.
+Race-test: samma konsult svarar JA två gånger samtidigt → exakt en
+tilldelning. *Tidigare beteende (bortvalt):* andra JA:et behandlades som
+nekad tilldelning.
+
+**B23. Ren tidsöverlapp kontrolleras i tilldelningstransaktionen
+(beställarkrav).** tilldela_plats verifierar, i samma transaktion som
+radlåset, att konsulten saknar överlappande aktiv bokning — utöver
+ATL-reglerna. Kapplöpningen mellan två parallella förfrågningar avgörs av
+databasens exclusion constraint: exakt en vinner, den andra får orsak
+"overlappande_bokning". Race-test: samma konsult svarar JA på två
+överlappande förfrågningar samtidigt → exakt en tilldelning.
+
+**B24. Bokningsimporten är atomär (beställarkrav).** Vid radfel rullas HELA
+importen tillbaka, kommandot avslutas med felkod och rapporten varnar
+uttryckligen om att ATL-kontrollen inte kan litas på förrän importen är
+komplett — en delvis importerad passhistorik ser giltig ut men räknar fel.
+Konsultimporten delimporterar fortsatt per rad med radrapport (en konsult
+för mycket/för lite påverkar inte lagefterlevnaden).
+
+**B25. HMAC-nyckelhantering (beställarnotering).** En förlorad
+PNR_HASH_NYCKEL bryter dublettkontrollen permanent — befintliga hashar kan
+aldrig matchas mot nya importer. I produktion ska nyckeln ligga i Secret
+Manager (eller motsvarande), aldrig i repot eller i en .env som committas.
+Utvecklingsnyckeln i app/config.py är enbart för lokal körning.
+
+**B26. Kvalificeringskontroll i registrera_utskick — övervägd men bortvald.**
+Verktyget tar en explicit konsultlista och litar på att anroparen (idag
+demo/CLI, senare agentlagret) hämtat den via lista_kvalificerade. Kärnan
+skyddar det som är farligt på riktigt — överbokning, dubbelbokning och ATL —
+på databasnivå; att skicka ett SMS till fel person är återkalleligt och
+stoppas senast vid tilldelningen. Kan läggas till senare utan schemaändring.
+
+**Beställarens svar på öppna frågor:** eskalering nås från alla aktiva
+tillstånd (inklusive tidsfrist i utskickad; fylld räknas inte som aktivt
+behov och behåller endast vägen till stängd/delvis_fylld), och avhopp efter
+fylld → delvis_fylld med nytt utskick tillåtet — båda enligt implementationen
+i etapp 2.
